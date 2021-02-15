@@ -37,7 +37,7 @@ void usage(const char *err)
 {
 	if(err != NULL) fprintf(stderr, "%s\n\n", err);
 	fprintf(stderr,
-		"Usage: teensy_loader_cli --mcu=<MCU> [-w] [-h] [-n] [-b] [-v] <file.hex>\n"
+		"Usage: teensy_loader_cli --mcu=<MCU> [--serial=<SERIAL>] [-w] [-h] [-n] [-b] [-v] <file.hex>\n"
 		"\t-w : Wait for device to appear\n"
 		"\t-r : Use hard reboot if device not online\n"
 		"\t-s : Use soft reboot if device not online (Teensy 3.x & 4.x)\n"
@@ -45,6 +45,7 @@ void usage(const char *err)
 		"\t-b : Boot only, do not program\n"
 		"\t-v : Verbose output\n"
 		"\nUse `teensy_loader_cli --list-mcus` to list supported MCUs.\n"
+		"\nUse `teensy_loader_cli ... --list-serials` to list connected Serials.\n"
 		"\nFor more information, please visit:\n"
 		"http://www.pjrc.com/teensy/loader_cli.html\n");
 	exit(1);
@@ -79,6 +80,7 @@ int verbose = 0;
 int boot_only = 0;
 int code_size = 0, block_size = 0;
 const char *filename=NULL;
+const char *serial=NULL;
 
 
 /****************************************************************/
@@ -227,7 +229,7 @@ int main(int argc, char **argv)
 // http://libusb.sourceforge.net/doc/index.html
 #include <usb.h>
 
-usb_dev_handle * open_usb_device(int vid, int pid)
+usb_dev_handle * open_usb_device(int vid, int pid, const char * ser)
 {
 	struct usb_bus *bus;
 	struct usb_device *dev;
@@ -241,11 +243,11 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 	//printf_verbose("\nSearching for USB device:\n");
 	for (bus = usb_get_busses(); bus; bus = bus->next) {
 		for (dev = bus->devices; dev; dev = dev->next) {
-			//printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X\n",
-			//	bus->dirname, dev->filename,
-			//	dev->descriptor.idVendor,
-			//	dev->descriptor.idProduct
-			//);
+			printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X\n",
+				bus->dirname, dev->filename,
+				dev->descriptor.idVendor,
+				dev->descriptor.idProduct
+			);
 			if (dev->descriptor.idVendor != vid) continue;
 			if (dev->descriptor.idProduct != pid) continue;
 			h = usb_open(dev);
@@ -253,6 +255,19 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 				printf_verbose("Found device but unable to open\n");
 				continue;
 			}
+            usb_get_string_simple(
+                h, dev->descriptor.iSerialNumber,
+                buf, sizeof(buf)
+            );
+            printf_verbose("serial=%s\n", buf);
+            if (ser) {
+                if (strncmp(ser, buf, sizeof(buf))) {
+                    usb_close(h);
+					printf_verbose("Found device, but with wrong serial\n");
+                    continue;
+                }
+			    printf_verbose("Found device with correct serial\n");
+            }
 			#ifdef LIBUSB_HAS_GET_DRIVER_NP
 			r = usb_get_driver_np(h, 0, buf, sizeof(buf));
 			if (r >= 0) {
@@ -282,13 +297,64 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 	return NULL;
 }
 
+void print_usb_serials(int vid, int pid)
+{
+	struct usb_bus *bus;
+	struct usb_device *dev;
+	usb_dev_handle *h;
+	char buf[128];
+    int first = 1;
+
+	usb_init();
+	usb_find_busses();
+	usb_find_devices();
+	//printf_verbose("\nSearching for USB device:\n");
+	for (bus = usb_get_busses(); bus; bus = bus->next) {
+		for (dev = bus->devices; dev; dev = dev->next) {
+			//printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X\n",
+			//	bus->dirname, dev->filename,
+			//	dev->descriptor.idVendor,
+			//	dev->descriptor.idProduct
+			//);
+			if (dev->descriptor.idVendor != vid) continue;
+			if (dev->descriptor.idProduct != pid) continue;
+			h = usb_open(dev);
+			if (!h) {
+				printf_verbose("Found device but unable to open\n");
+				continue;
+			}
+            usb_get_string_simple(
+                h, dev->descriptor.iSerialNumber,
+                buf, sizeof(buf)
+            );
+            //printf_verbose("serial=%s\n", dev_ser);
+            if (first) {
+                first = 0;
+            } else {
+                printf(", ");
+            }
+            printf("%s", buf);
+            usb_close(h);
+		}
+	}
+
+    if (first) {
+        printf("None\n");
+    } else {
+        printf("\n");
+    }
+}
+
 static usb_dev_handle *libusb_teensy_handle = NULL;
 
 int teensy_open(void)
 {
 	teensy_close();
-	libusb_teensy_handle = open_usb_device(0x16C0, 0x0478);
-	if (libusb_teensy_handle) return 1;
+	libusb_teensy_handle = open_usb_device(0x16C0, 0x0478, serial);
+	if (libusb_teensy_handle) {
+        serial = NULL;
+        return 1;
+    }
 	return 0;
 }
 
@@ -321,12 +387,13 @@ int hard_reboot(void)
 	usb_dev_handle *rebootor;
 	int r;
 
-	rebootor = open_usb_device(0x16C0, 0x0477);
+	rebootor = open_usb_device(0x16C0, 0x0477, serial);
 	if (!rebootor) return 0;
 	r = usb_control_msg(rebootor, 0x21, 9, 0x0200, 0, "reboot", 6, 100);
 	usb_release_interface(rebootor, 0);
 	usb_close(rebootor);
 	if (r < 0) return 0;
+    serial = NULL;
 	return 1;
 }
 
@@ -334,7 +401,7 @@ int soft_reboot(void)
 {
 	usb_dev_handle *serial_handle = NULL;
 
-	serial_handle = open_usb_device(0x16C0, 0x0483);
+	serial_handle = open_usb_device(0x16C0, 0x0483, serial);
 	if (!serial_handle) {
 		char *error = usb_strerror();
 		printf("Error opening USB device: %s\n", error);
@@ -353,6 +420,7 @@ int soft_reboot(void)
 		return 0;
 	}
 
+    serial = NULL;
 	return 1;
 }
 
@@ -373,7 +441,7 @@ int soft_reboot(void)
 #include <ddk/hidsdi.h>
 #include <ddk/hidclass.h>
 
-HANDLE open_usb_device(int vid, int pid)
+HANDLE open_usb_device(int vid, int pid, const char * ser)
 {
 	GUID guid;
 	HDEVINFO info;
@@ -473,7 +541,7 @@ static HANDLE win32_teensy_handle = NULL;
 int teensy_open(void)
 {
 	teensy_close();
-	win32_teensy_handle = open_usb_device(0x16C0, 0x0478);
+	win32_teensy_handle = open_usb_device(0x16C0, 0x0478, NULL);
 	if (win32_teensy_handle) return 1;
 	return 0;
 }
@@ -508,7 +576,7 @@ int hard_reboot(void)
 	HANDLE rebootor;
 	int r;
 
-	rebootor = open_usb_device(0x16C0, 0x0477);
+	rebootor = open_usb_device(0x16C0, 0x0477, NULL);
 	if (!rebootor) return 0;
 	r = write_usb_device(rebootor, "reboot", 6, 100);
 	CloseHandle(rebootor);
@@ -632,7 +700,7 @@ static void do_run_loop(void)
 	while (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true) == kCFRunLoopRunHandledSource) ;
 }
 
-IOHIDDeviceRef open_usb_device(int vid, int pid)
+IOHIDDeviceRef open_usb_device(int vid, int pid, const char * ser)
 {
 	struct usb_list_struct *p;
 	IOReturn ret;
@@ -666,7 +734,7 @@ static IOHIDDeviceRef iokit_teensy_reference = NULL;
 int teensy_open(void)
 {
 	teensy_close();
-	iokit_teensy_reference = open_usb_device(0x16C0, 0x0478);
+	iokit_teensy_reference = open_usb_device(0x16C0, 0x0478, NULL);
 	if (iokit_teensy_reference) return 1;
 	return 0;
 }
@@ -704,7 +772,7 @@ int hard_reboot(void)
 	IOHIDDeviceRef rebootor;
 	IOReturn ret;
 
-	rebootor = open_usb_device(0x16C0, 0x0477);
+	rebootor = open_usb_device(0x16C0, 0x0477, NULL);
 	if (!rebootor) return 0;
 	ret = IOHIDDeviceSetReport(rebootor,
 		kIOHIDReportTypeOutput, 0, (uint8_t *)("reboot"), 6);
@@ -742,7 +810,7 @@ int soft_reboot(void)
 #include <dev/usb/usb_ioctl.h>
 #endif
 
-int open_usb_device(int vid, int pid)
+int open_usb_device(int vid, int pid, const char * ser)
 {
 	int r, fd;
 	DIR *dir;
@@ -784,7 +852,7 @@ static int uhid_teensy_fd = -1;
 int teensy_open(void)
 {
 	teensy_close();
-	uhid_teensy_fd = open_usb_device(0x16C0, 0x0478);
+	uhid_teensy_fd = open_usb_device(0x16C0, 0x0478, NULL);
 	if (uhid_teensy_fd < 0) return 0;
 	return 1;
 }
@@ -811,7 +879,7 @@ int hard_reboot(void)
 {
 	int r, rebootor_fd;
 
-	rebootor_fd = open_usb_device(0x16C0, 0x0477);
+	rebootor_fd = open_usb_device(0x16C0, 0x0477, NULL);
 	if (rebootor_fd < 0) return 0;
 	r = write(rebootor_fd, "reboot", 6);
 	delay(0.1);
@@ -1096,6 +1164,19 @@ void list_mcus()
 	exit(1);
 }
 
+void print_usb_serials(int vid, int pid);
+
+void list_serials()
+{
+	printf("Teensy HalfKay Bootloader Serials: ");
+    print_usb_serials(0x16C0, 0x0478);
+	printf("Teensy Hard Rebooter Serials: ");
+	print_usb_serials(0x16C0, 0x0477);
+	printf("Teensy Soft Rebooter Serials: ");
+	print_usb_serials(0x16C0, 0x0483);
+	exit(1);
+}
+
 
 void read_mcu(char *name)
 {
@@ -1116,6 +1197,12 @@ void read_mcu(char *name)
 
 	fprintf(stderr, "Unknown MCU type \"%s\"\n", name);
 	list_mcus();
+}
+
+
+void read_serial(char *name)
+{
+    serial = name;
 }
 
 
@@ -1167,7 +1254,9 @@ void parse_options(int argc, char **argv)
 
 				if(strcasecmp(name, "help") == 0) usage(NULL);
 				else if(strcasecmp(name, "mcu") == 0) read_mcu(val);
+				else if(strcasecmp(name, "serial") == 0) read_serial(val);
 				else if(strcasecmp(name, "list-mcus") == 0) list_mcus();
+				else if(strcasecmp(name, "list-serials") == 0) list_serials();
 				else {
 					fprintf(stderr, "Unknown option \"%s\"\n\n", arg);
 					usage(NULL);
